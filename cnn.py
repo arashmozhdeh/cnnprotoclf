@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.optim import Adam
+from tqdm import tqdm
+import sys
 
 # Initialize constants and dictionary
 quant_dict = {'A': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5, 'G': 6, 'H': 7, 'I': 8, 'K': 9, 'L': 10, 'M': 11, 'N': 12, 'P': 13, 'Q': 14, 'R': 15, 'S': 16, 'T': 17, 'V': 18, 'W': 19, 'Y': 20}
@@ -160,33 +162,36 @@ criterion = nn.CrossEntropyLoss()
 optimizer = Adam(model.parameters())
 
 num_epochs = 400  # example
+
 for epoch in range(num_epochs):
     model.train()
-    for inputs, labels in train_loader:
+    
+    # Training Loop for SLURM
+    train_loss = 0.0
+    for inputs, labels in tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{num_epochs}", file=sys.stdout, leave=True):
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
+        train_loss += loss.item()
 
-    # Validation Loop
+    # Validation Loop for SLURM
     model.eval()
     valid_loss = 0.0
     all_predictions = []
     all_true_labels = []
 
-    for inputs, labels in valid_loader:
+    for inputs, labels in tqdm(valid_loader, desc=f"Validating Epoch {epoch + 1}/{num_epochs}", file=sys.stdout, leave=True):
         inputs, labels = inputs.to(device), labels.to(device)
         outputs = model(inputs)
         loss = criterion(outputs, labels)
         valid_loss += loss.item()
+        _, predicted = torch.max(outputs.data, 1)
+        all_predictions.extend(predicted.cpu().numpy())
+        all_true_labels.extend(labels.cpu().numpy())
 
-        _, predicted = torch.max(outputs.data, 1)  # Convert logits to class predictions
-        all_predictions.extend(predicted.cpu().numpy())  # Store predictions
-        all_true_labels.extend(labels.cpu().numpy())    # Store true labels
-
-    # Compute metrics after the validation loop
     accuracy = accuracy_score(all_true_labels, all_predictions)
     f1 = f1_score(all_true_labels, all_predictions, average='macro')
     recall = recall_score(all_true_labels, all_predictions, average='macro')
@@ -194,5 +199,31 @@ for epoch in range(num_epochs):
         warnings.simplefilter("ignore", category=UndefinedMetricWarning)
         precision = precision_score(all_true_labels, all_predictions, average='macro')
 
-    print(f"Epoch: {epoch+1}, Validation Loss: {valid_loss/len(valid_loader)}, "
-          f"Accuracy: {accuracy}, F1 Score: {f1}, Recall: {recall}, Precision: {precision}")
+    print(f"Epoch {epoch+1}/{num_epochs}")
+    print(f"Training Loss: {train_loss/len(train_loader):.4f}")
+    print(f"Validation Loss: {valid_loss/len(valid_loader):.4f}")
+    print(f"Validation Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}, Recall: {recall:.4f}, Precision: {precision:.4f}")
+
+    # Test Loop for SLURM
+    test_loss = 0.0
+    all_test_predictions = []
+    all_test_true_labels = []
+    for inputs, labels in tqdm(test_loader, desc=f"Testing Epoch {epoch + 1}/{num_epochs}", file=sys.stdout, leave=True):
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        test_loss += loss.item()
+        _, predicted = torch.max(outputs.data, 1)
+        all_test_predictions.extend(predicted.cpu().numpy())
+        all_test_true_labels.extend(labels.cpu().numpy())
+
+    test_accuracy = accuracy_score(all_test_true_labels, all_test_predictions)
+    test_f1 = f1_score(all_test_true_labels, all_test_predictions, average='macro')
+    test_recall = recall_score(all_test_true_labels, all_test_predictions, average='macro')
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=UndefinedMetricWarning)
+        test_precision = precision_score(all_test_true_labels, all_test_predictions, average='macro')
+
+    print(f"Test Loss: {test_loss/len(test_loader):.4f}")
+    print(f"Test Accuracy: {test_accuracy:.4f}, F1 Score: {test_f1:.4f}, Recall: {test_recall:.4f}, Precision: {test_precision:.4f}")
+    print("--------------------------------------------------------------------------------")
