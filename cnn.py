@@ -48,10 +48,10 @@ test_dataset = preprocess_data(test_dataset)
 all_three_grams = train_dataset['ThreeGrams'].tolist() + valid_dataset['ThreeGrams'].tolist()
 
 # Word2Vec embedding
-embedding_size = 21
+embedding_size = 31
 w2v_model = Word2Vec(vector_size=embedding_size, window=5, min_count=1, workers=16, alpha=0.025, min_alpha=0.0001)
 w2v_model.build_vocab(all_three_grams)
-w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=10)
+w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=30)
 
 def sequence_to_embedding(seq):
     embeddings = [w2v_model.wv[three_gram] for three_gram in seq if three_gram in w2v_model.wv]
@@ -123,7 +123,7 @@ class ProteinFamilyClassifier(nn.Module):
         self.fc3 = nn.Linear(1024, num_classes)  # num_classes: number of protein families
 
         # Dropout
-        self.dropout = nn.Dropout(0.55)
+        self.dropout = nn.Dropout(0.65)
 
     def forward(self, x):
         x = x.transpose(1, 2)
@@ -166,9 +166,9 @@ num_epochs = 400  # example
 for epoch in range(num_epochs):
     model.train()
     
-    # Training Loop for SLURM
+    # Training Loop without tqdm
     train_loss = 0.0
-    for inputs, labels in tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{num_epochs}", file=sys.stdout, leave=True):
+    for inputs, labels in train_loader:
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -177,13 +177,13 @@ for epoch in range(num_epochs):
         optimizer.step()
         train_loss += loss.item()
 
-    # Validation Loop for SLURM
+    # Validation Loop without tqdm
     model.eval()
     valid_loss = 0.0
     all_predictions = []
     all_true_labels = []
 
-    for inputs, labels in tqdm(valid_loader, desc=f"Validating Epoch {epoch + 1}/{num_epochs}", file=sys.stdout, leave=True):
+    for inputs, labels in valid_loader:
         inputs, labels = inputs.to(device), labels.to(device)
         outputs = model(inputs)
         loss = criterion(outputs, labels)
@@ -204,11 +204,11 @@ for epoch in range(num_epochs):
     print(f"Validation Loss: {valid_loss/len(valid_loader):.4f}")
     print(f"Validation Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}, Recall: {recall:.4f}, Precision: {precision:.4f}")
 
-    # Test Loop for SLURM
+    # Test Loop without tqdm
     test_loss = 0.0
     all_test_predictions = []
     all_test_true_labels = []
-    for inputs, labels in tqdm(test_loader, desc=f"Testing Epoch {epoch + 1}/{num_epochs}", file=sys.stdout, leave=True):
+    for inputs, labels in test_loader:
         inputs, labels = inputs.to(device), labels.to(device)
         outputs = model(inputs)
         loss = criterion(outputs, labels)
@@ -227,3 +227,4 @@ for epoch in range(num_epochs):
     print(f"Test Loss: {test_loss/len(test_loader):.4f}")
     print(f"Test Accuracy: {test_accuracy:.4f}, F1 Score: {test_f1:.4f}, Recall: {test_recall:.4f}, Precision: {test_precision:.4f}")
     print("--------------------------------------------------------------------------------")
+    sys.stdout.flush()
