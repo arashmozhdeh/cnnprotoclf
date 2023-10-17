@@ -48,10 +48,10 @@ test_dataset = preprocess_data(test_dataset)
 all_three_grams = train_dataset['ThreeGrams'].tolist() + valid_dataset['ThreeGrams'].tolist()
 
 # Word2Vec embedding
-embedding_size = 31
+embedding_size = 21
 w2v_model = Word2Vec(vector_size=embedding_size, window=5, min_count=1, workers=16, alpha=0.025, min_alpha=0.0001)
 w2v_model.build_vocab(all_three_grams)
-w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=30)
+w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=10)
 
 def sequence_to_embedding(seq):
     embeddings = [w2v_model.wv[three_gram] for three_gram in seq if three_gram in w2v_model.wv]
@@ -123,7 +123,7 @@ class ProteinFamilyClassifier(nn.Module):
         self.fc3 = nn.Linear(1024, num_classes)  # num_classes: number of protein families
 
         # Dropout
-        self.dropout = nn.Dropout(0.65)
+        self.dropout = nn.Dropout(0.6)
 
     def forward(self, x):
         x = x.transpose(1, 2)
@@ -147,7 +147,7 @@ class ProteinFamilyClassifier(nn.Module):
         return x
 
 # Create datasets and data loaders
-batch_size = 256
+batch_size = 128
 train_dataset_obj = ProteinDataset(train_dataset)
 valid_dataset_obj = ProteinDataset(valid_dataset)
 test_dataset_obj = ProteinDataset(test_dataset)
