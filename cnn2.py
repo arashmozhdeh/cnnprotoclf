@@ -11,6 +11,36 @@ from gensim.models import Word2Vec
 import argparse
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
+import os
+import time
+from contextlib import contextmanager
+import warnings
+from sklearn.exceptions import UndefinedMetricWarning
+
+@contextmanager
+def timer(name):
+    t0 = time.time()
+    yield
+    print(f'[{name}] done in {time.time() - t0:.0f} s')
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--embedding_size', type=int, default=21, help="Word2Vec embedding size")
+parser.add_argument('--w2v_epochs', type=int, default=10, help="Word2Vec number of epochs")
+parser.add_argument('--fc_hidden_dim', type=int, default=1024, help="Hidden dimension size of the fully connected layer")
+parser.add_argument('--dropout', type=float, default=0.6, help="Dropout probability")
+parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', choices=['cuda', 'cpu'], help="Device to use: cuda or cpu")
+parser.add_argument('--num_gpus', type=int, default=1, help="Number of GPUs to use. Set to 0 to use CPU")
+parser.add_argument('--epochs', type=int, default=400, help='number of epochs (default: 10)')
+parser.add_argument('--batch_size', type=int, default=256, help='batch size (default: 256)')
+parser.add_argument('--shot_size', type=int, default=None, help='shot size for few-shot learning (default: None)')
+parser.add_argument('--train_data_path', type=str, default="./dataset/train_dataset.csv", help="Path to the training dataset")
+parser.add_argument('--val_data_path', type=str, default="./dataset/valid_dataset.csv", help="Path to the validation dataset")
+parser.add_argument('--test_data_path', type=str, default="./dataset/test_dataset.csv", help="Path to the test dataset")
+args = parser.parse_args()
+
+logger = TensorBoardLogger("logs", name="protein_family")
+logger.log_hyperparams(vars(args))  # Log the hyperparameters
 
 # Initialize constants and dictionary
 quant_dict = {'A': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5, 'G': 6, 'H': 7, 'I': 8, 'K': 9, 'L': 10, 'M': 11, 'N': 12, 'P': 13, 'Q': 14, 'R': 15, 'S': 16, 'T': 17, 'V': 18, 'W': 19, 'Y': 20}
@@ -25,9 +55,9 @@ train_dataset_path = "./dataset/train_dataset.csv"
 valid_dataset_path = "./dataset/valid_dataset.csv"
 test_dataset_path = "./dataset/test_dataset.csv"
 
-train_dataset = pd.read_csv(train_dataset_path)[['Protein families', 'Sequence']]
-valid_dataset = pd.read_csv(valid_dataset_path)[['Protein families', 'Sequence']]
-test_dataset = pd.read_csv(test_dataset_path)[['Protein families', 'Sequence']]
+train_dataset = pd.read_csv(args.train_data_path)[['Protein families', 'Sequence']]
+valid_dataset = pd.read_csv(args.val_data_path)[['Protein families', 'Sequence']]
+test_dataset = pd.read_csv(args.test_data_path)[['Protein families', 'Sequence']]
 
 train_dataset.columns = ['Label', 'Seq']
 valid_dataset.columns = ['Label', 'Seq']
@@ -48,8 +78,8 @@ test_dataset = preprocess_data(test_dataset)
 all_three_grams = train_dataset['ThreeGrams'].tolist() + valid_dataset['ThreeGrams'].tolist()
 
 # Word2Vec embedding
-embedding_size = 21
-w2v_model = Word2Vec(vector_size=embedding_size, window=5, min_count=1, workers=16, alpha=0.025, min_alpha=0.0001)
+embedding_size = args.embedding_size
+w2v_model = Word2Vec(vector_size=embedding_size, window=3, min_count=1, workers=16, alpha=0.025, min_alpha=0.0001)
 w2v_model.build_vocab(all_three_grams)
 w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=10)
 
@@ -87,11 +117,13 @@ label_map = {label: idx for idx, label in enumerate(unique_labels)}
 class ProteinDataset(Dataset):
     def __init__(self, dataframe, max_length=None):
         self.data = dataframe
-        # If max_length is not provided, use the maximum sequence length in the dataframe
         self.max_length = max_length or max(dataframe['NormalizedEmbeddings'].apply(len))
+        
     def random_sample(self, shot_size):
         """Randomly sample a few shots."""
-        self.data = self.data.sample(n=shot_size)
+        # Check if shot_size is provided, else skip random sampling
+        if shot_size:
+            self.data = self.data.sample(n=shot_size)
 
 class ProteinFamilyClassifier(pl.LightningModule):
     def __init__(self, criterion):
@@ -105,12 +137,12 @@ class ProteinFamilyClassifier(pl.LightningModule):
         self.conv7 = nn.Conv1d(128, 128, kernel_size=3, padding=(3-1)//2)
 
         # Fully connected layers
-        self.fc1 = nn.Linear(128 * 2, 1024)  # Adjust this multiplier based on the size after pooling
-        self.fc2 = nn.Linear(1024, 1024)
-        self.fc3 = nn.Linear(1024, num_classes)  # num_classes: number of protein families
+        self.fc1 = nn.Linear(128 * 2, args.fc_hidden_dim)  
+        self.fc2 = nn.Linear(args.fc_hidden_dim, args.fc_hidden_dim)
+        self.fc3 = nn.Linear(args.fc_hidden_dim, num_classes)  # num_classes: number of protein families
 
         # Dropout
-        self.dropout = nn.Dropout(0.6)
+        self.dropout = nn.Dropout(args.dropout)
         self.criterion = criterion
 
     def forward(self, x):
@@ -139,21 +171,22 @@ class ProteinFamilyClassifier(pl.LightningModule):
         return optimizer
 
     def training_step(self, batch, batch_idx):
-    inputs, labels = batch
-        outputs = self(inputs)
-        loss = F.cross_entropy(outputs, labels)
-        _, predicted = torch.max(outputs.data, 1)
+    	with timer(f'Training iteration {batch_idx}'):
+            inputs, labels = batch
+            outputs = self(inputs)
+            loss = F.cross_entropy(outputs, labels)
+            _, predicted = torch.max(outputs.data, 1)
 
-        # Compute metrics (for demonstration purposes, we'll compute accuracy)
-        correct = (predicted == labels).float().sum()
-        accuracy = correct / len(labels)
+            # Compute metrics
+            correct = (predicted == labels).float().sum()
+            accuracy = correct / len(labels)
 
-        return {
-            "loss": loss,
-            "pred": predicted,
-            "true": labels,
-            "accuracy": accuracy
-        }
+            return {
+                "loss": loss,
+                "pred": predicted,
+                "true": labels,
+                "accuracy": accuracy
+            }
 
     def training_epoch_end(self, outputs):
         avg_loss = torch.stack([x["loss"] for x in outputs]).mean()
@@ -232,13 +265,14 @@ class ProteinFamilyClassifier(pl.LightningModule):
         return {"test_loss": avg_loss, "log": logs}
 
 class ProteinDataModule(pl.LightningDataModule):
-    def __init__(self, train_df, val_df, test_df, batch_size=256, shot_size=None):
+    def __init__(self, train_df, val_df, test_df, batch_size=256, shot_size=None, num_workers=4):
         super(ProteinDataModule, self).__init__()
         self.train_df = train_df
         self.val_df = val_df
         self.test_df = test_df
         self.batch_size = batch_size
         self.shot_size = shot_size
+        self.num_workers = num_workers
 
     def setup(self, stage=None):
         if self.shot_size:
@@ -252,25 +286,27 @@ class ProteinDataModule(pl.LightningDataModule):
         self.test_dataset = ProteinDataset(self.test_df)
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+        train_dataset = ProteinDataset(self.train_df)
+        return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size)
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
 
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size)
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
 
 # Main execution
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device(args.device)
 criterion = nn.CrossEntropyLoss()
 
 # Initialize DataModule and Model
-data_module = ProteinDataModule(train_dataset, valid_dataset, test_dataset, shot_size=50)  # 50-shot learning as an example
+data_module = ProteinDataModule(train_dataset, valid_dataset, test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shot_size=args.shot_size)
 model = ProteinFamilyClassifier(criterion)
 
 # Train
-trainer = pl.Trainer(max_epochs=num_epochs, gpus=2 if torch.cuda.is_available() else 0)
+logger = TensorBoardLogger("tb_logs", name="protein_classifier")
+trainer = pl.Trainer(max_epochs=num_epochs, gpus=args.num_gpus if args.device == 'cuda' else 0, logger=logger)
 trainer.fit(model, data_module)
 
 # Test
