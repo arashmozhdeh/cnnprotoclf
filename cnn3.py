@@ -1,3 +1,5 @@
+import argparse
+from torch.utils.tensorboard import SummaryWriter
 import pandas as pd
 import numpy as np
 import warnings
@@ -12,6 +14,21 @@ from torch.optim import Adam
 from tqdm import tqdm
 import sys
 
+
+# Hyperparameters and paths via argparse
+parser = argparse.ArgumentParser(description="Train a protein classifier")
+parser.add_argument("--train_dataset_path", default="./dataset/train_dataset.csv", type=str, help="Path to training dataset")
+parser.add_argument("--valid_dataset_path", default="./dataset/valid_dataset.csv", type=str, help="Path to validation dataset")
+parser.add_argument("--test_dataset_path", default="./dataset/test_dataset.csv", type=str, help="Path to test dataset")
+parser.add_argument("--num_epochs", default=256, type=int, help="Number of epochs")
+parser.add_argument("--batch_size", default=128, type=int, help="Batch size for training and validation")
+parser.add_argument("--w2v_embedding_size", default=21, type=int, help="Embedding size for Word2Vec")
+parser.add_argument("--w2v_num_epochs", default=400, type=int, help="Number of epochs for Word2Vec")
+parser.add_argument("--embedding_size", default=1024, type=int, help="Embedding size for fc layers")
+parser.add_argument("--dropout", type=float, default=0.6, help="Dropout probability")
+parser.add_argument("--num_shots", default=None, type=int, help="Number of samples for few-shot learning. If not provided, the full dataset is used.")
+args = parser.parse_args()
+
 # Initialize constants and dictionary
 quant_dict = {'A': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5, 'G': 6, 'H': 7, 'I': 8, 'K': 9, 'L': 10, 'M': 11, 'N': 12, 'P': 13, 'Q': 14, 'R': 15, 'S': 16, 'T': 17, 'V': 18, 'W': 19, 'Y': 20}
 
@@ -21,13 +38,17 @@ def quantize_sequence(sequence):
 def to_three_grams(sequence):
     return [sequence[i:i+3] for i in range(0, len(sequence), 3)]
 
-train_dataset_path = "./dataset/train_dataset.csv"
-valid_dataset_path = "./dataset/valid_dataset.csv"
-test_dataset_path = "./dataset/test_dataset.csv"
+train_dataset_path = args.train_dataset_path
+valid_dataset_path = args.valid_dataset_path
+test_dataset_path = args.test_dataset_path
 
 train_dataset = pd.read_csv(train_dataset_path)[['Protein families', 'Sequence']]
 valid_dataset = pd.read_csv(valid_dataset_path)[['Protein families', 'Sequence']]
 test_dataset = pd.read_csv(test_dataset_path)[['Protein families', 'Sequence']]
+
+if args.num_shots:
+    train_dataset = train_dataset.sample(n=args.num_shots, replace=False)
+    valid_dataset = valid_dataset.sample(n=args.num_shots, replace=False)
 
 train_dataset.columns = ['Label', 'Seq']
 valid_dataset.columns = ['Label', 'Seq']
@@ -48,10 +69,10 @@ test_dataset = preprocess_data(test_dataset)
 all_three_grams = train_dataset['ThreeGrams'].tolist() + valid_dataset['ThreeGrams'].tolist()
 
 # Word2Vec embedding
-embedding_size = 21
+embedding_size = args.w2v_embedding_size
 w2v_model = Word2Vec(vector_size=embedding_size, window=5, min_count=1, workers=16, alpha=0.025, min_alpha=0.0001)
 w2v_model.build_vocab(all_three_grams)
-w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=10)
+w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=args.w2v_num_epochs)
 
 def sequence_to_embedding(seq):
     embeddings = [w2v_model.wv[three_gram] for three_gram in seq if three_gram in w2v_model.wv]
@@ -79,10 +100,6 @@ test_dataset.drop(columns=['ThreeGrams'], inplace=True)
 num_classes = train_dataset['Label'].nunique()
 unique_labels = train_dataset['Label'].unique().tolist()
 label_map = {label: idx for idx, label in enumerate(unique_labels)}
-
-# train_dataset['MappedLabel'] = train_dataset['Label'].map(label_map)
-# valid_dataset['MappedLabel'] = valid_dataset['Label'].map(label_map)
-# test_dataset['MappedLabel'] = test_dataset['Label'].map(label_map)
 
 class ProteinDataset(Dataset):
     def __init__(self, dataframe, max_length=None):
@@ -118,12 +135,12 @@ class ProteinFamilyClassifier(nn.Module):
         self.conv7 = nn.Conv1d(128, 128, kernel_size=3, padding=(3-1)//2)
 
         # Fully connected layers
-        self.fc1 = nn.Linear(128 * 2, 1024)  # Adjust this multiplier based on the size after pooling
-        self.fc2 = nn.Linear(1024, 1024)
-        self.fc3 = nn.Linear(1024, num_classes)  # num_classes: number of protein families
+        self.fc1 = nn.Linear(128 * 2, args.embedding_size)  # Adjust this multiplier based on the size after pooling
+        self.fc2 = nn.Linear(args.embedding_size, args.embedding_size)
+        self.fc3 = nn.Linear(args.embedding_size, num_classes)  # num_classes: number of protein families
 
         # Dropout
-        self.dropout = nn.Dropout(0.6)
+        self.dropout = nn.Dropout(args.dropout)
 
     def forward(self, x):
         x = x.transpose(1, 2)
@@ -147,7 +164,7 @@ class ProteinFamilyClassifier(nn.Module):
         return x
 
 # Create datasets and data loaders
-batch_size = 128
+batch_size = args.batch_size
 train_dataset_obj = ProteinDataset(train_dataset)
 valid_dataset_obj = ProteinDataset(valid_dataset)
 test_dataset_obj = ProteinDataset(test_dataset)
@@ -161,9 +178,12 @@ model = ProteinFamilyClassifier().to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = Adam(model.parameters())
 
-num_epochs = 400  # example
+num_epochs = args.num_epochs  # example
 
-for epoch in range(num_epochs):
+writer = SummaryWriter()
+print(f"Training started")
+sys.stdout.flush()
+for epoch in range(args.num_epochs):
     model.train()
     # Training Loop without tqdm
     train_loss = 0.0
@@ -202,6 +222,14 @@ for epoch in range(num_epochs):
     print(f"Training Loss: {train_loss/len(train_loader):.4f}")
     print(f"Validation Loss: {valid_loss/len(valid_loader):.4f}")
     print(f"Validation Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}, Recall: {recall:.4f}, Precision: {precision:.4f}")
+    sys.stdout.flush()
+    # Log metrics to TensorBoard
+    writer.add_scalar('Training Loss', train_loss/len(train_loader), epoch)
+    writer.add_scalar('Validation Loss', valid_loss/len(valid_loader), epoch)
+    writer.add_scalar('Validation Accuracy', accuracy, epoch)
+    writer.add_scalar('Validation F1 Score', f1, epoch)
+    writer.add_scalar('Validation Recall', recall, epoch)
+    writer.add_scalar('Validation Precision', precision, epoch)
 
     # Test Loop without tqdm
     test_loss = 0.0
@@ -227,3 +255,14 @@ for epoch in range(num_epochs):
     print(f"Test Accuracy: {test_accuracy:.4f}, F1 Score: {test_f1:.4f}, Recall: {test_recall:.4f}, Precision: {test_precision:.4f}")
     print("--------------------------------------------------------------------------------")
     sys.stdout.flush()
+
+    # Log test metrics to TensorBoard
+    writer.add_scalar('Test Loss', test_loss/len(test_loader), epoch)
+    writer.add_scalar('Test Accuracy', test_accuracy, epoch)
+    writer.add_scalar('Test F1 Score', test_f1, epoch)
+    writer.add_scalar('Test Recall', test_recall, epoch)
+    writer.add_scalar('Test Precision', test_precision, epoch)
+
+print(f"Training finished")
+sys.stdout.flush()
+writer.close()
