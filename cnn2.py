@@ -81,7 +81,7 @@ all_three_grams = train_dataset['ThreeGrams'].tolist() + valid_dataset['ThreeGra
 embedding_size = args.embedding_size
 w2v_model = Word2Vec(vector_size=embedding_size, window=3, min_count=1, workers=16, alpha=0.025, min_alpha=0.0001)
 w2v_model.build_vocab(all_three_grams)
-w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=10)
+w2v_model.train(all_three_grams, total_examples=len(all_three_grams), epochs=args.w2v_epochs)
 
 def sequence_to_embedding(seq):
     embeddings = [w2v_model.wv[three_gram] for three_gram in seq if three_gram in w2v_model.wv]
@@ -118,7 +118,7 @@ class ProteinDataset(Dataset):
     def __init__(self, dataframe, max_length=None):
         self.data = dataframe
         self.max_length = max_length or max(dataframe['NormalizedEmbeddings'].apply(len))
-        
+
     def random_sample(self, shot_size):
         """Randomly sample a few shots."""
         # Check if shot_size is provided, else skip random sampling
@@ -137,7 +137,7 @@ class ProteinFamilyClassifier(pl.LightningModule):
         self.conv7 = nn.Conv1d(128, 128, kernel_size=3, padding=(3-1)//2)
 
         # Fully connected layers
-        self.fc1 = nn.Linear(128 * 2, args.fc_hidden_dim)  
+        self.fc1 = nn.Linear(128 * 2, args.fc_hidden_dim)
         self.fc2 = nn.Linear(args.fc_hidden_dim, args.fc_hidden_dim)
         self.fc3 = nn.Linear(args.fc_hidden_dim, num_classes)  # num_classes: number of protein families
 
@@ -201,6 +201,8 @@ class ProteinFamilyClassifier(pl.LightningModule):
             "train_acc": torch.tensor(avg_accuracy),
             "train_f1": torch.tensor(f1)
         }
+        print(f"Epoch {self.current_epoch} - Train Loss: {avg_loss.item()}, Accuracy: {avg_accuracy}, F1: {f1}")
+        sys.stdout.flush()
         return {"loss": avg_loss, "log": logs}
 
 
@@ -225,11 +227,13 @@ class ProteinFamilyClassifier(pl.LightningModule):
 
         logs = {
             "val_loss": avg_loss,
-            "val_acc": torch.tensor(accuracy), 
+            "val_acc": torch.tensor(accuracy),
             "val_f1": torch.tensor(f1),
             "val_recall": torch.tensor(recall),
             "val_precision": torch.tensor(precision)
         }
+        print(f"Epoch {self.current_epoch} - Validation Loss: {avg_loss.item()}, Accuracy: {accuracy}, F1: {f1}, Recall: {recall}, Precision: {precision}")
+        sys.stdout.flush()
         return {"val_loss": avg_loss, "log": logs}
 
     def test_step(self, batch, batch_idx):
@@ -257,22 +261,23 @@ class ProteinFamilyClassifier(pl.LightningModule):
 
         logs = {
             "test_loss": avg_loss,
-            "test_acc": torch.tensor(accuracy), 
+            "test_acc": torch.tensor(accuracy),
             "test_f1": torch.tensor(f1),
             "test_recall": torch.tensor(recall),
             "test_precision": torch.tensor(precision)
         }
+        print(f"Epoch {self.current_epoch} - Validation Loss: {avg_loss.item()}, Accuracy: {accuracy}, F1: {f1}, Recall: {recall}, Precision: {precision}")
+        sys.stdout.flush()
         return {"test_loss": avg_loss, "log": logs}
 
 class ProteinDataModule(pl.LightningDataModule):
-    def __init__(self, train_df, val_df, test_df, batch_size=256, shot_size=None, num_workers=4):
+    def __init__(self, train_df, val_df, test_df, batch_size=256, shot_size=None):
         super(ProteinDataModule, self).__init__()
         self.train_df = train_df
         self.val_df = val_df
         self.test_df = test_df
         self.batch_size = batch_size
         self.shot_size = shot_size
-        self.num_workers = num_workers
 
     def setup(self, stage=None):
         if self.shot_size:
@@ -287,13 +292,13 @@ class ProteinDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         train_dataset = ProteinDataset(self.train_df)
-        return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
+        return DataLoader(self.val_dataset, batch_size=self.batch_size)
 
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
+        return DataLoader(self.test_dataset, batch_size=self.batch_size)
 
 # Main execution
 
@@ -301,12 +306,13 @@ device = torch.device(args.device)
 criterion = nn.CrossEntropyLoss()
 
 # Initialize DataModule and Model
-data_module = ProteinDataModule(train_dataset, valid_dataset, test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shot_size=args.shot_size)
+data_module = ProteinDataModule(train_dataset, valid_dataset, test_dataset, batch_size=args.batch_size, shot_size=args.shot_size)
 model = ProteinFamilyClassifier(criterion)
 
 # Train
 logger = TensorBoardLogger("tb_logs", name="protein_classifier")
-trainer = pl.Trainer(max_epochs=num_epochs, gpus=args.num_gpus if args.device == 'cuda' else 0, logger=logger)
+trainer = pl.Trainer(max_epochs=args.epochs, devices=args.num_gpus if args.device == 'cuda' else 0, accelerator="gpu" if args.device == 'cuda' else 0, logger=logger)
+#trainer = pl.Trainer(max_epochs=args.epochs, gpus=args.num_gpus if args.device == 'cuda' else 0, logger=logger, progress_bar_refresh_rate=1)
 trainer.fit(model, data_module)
 
 # Test
